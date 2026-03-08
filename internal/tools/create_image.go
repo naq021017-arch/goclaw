@@ -25,17 +25,18 @@ type credentialProvider interface {
 }
 
 // imageGenProviderPriority is the default order for image generation providers.
-var imageGenProviderPriority = []string{"openrouter", "gemini", "openai"}
+var imageGenProviderPriority = []string{"openrouter", "gemini", "openai", "minimax", "dashscope"}
 
 // imageGenModelDefaults maps provider names to default image generation models.
 var imageGenModelDefaults = map[string]string{
 	"openrouter": "google/gemini-2.5-flash-image",
 	"openai":     "dall-e-3",
 	"gemini":     "gemini-2.5-flash-image",
+	"minimax":    "image-01",
+	"dashscope":  "wan2.6-image",
 }
 
 // CreateImageTool generates images using an image generation API.
-// Uses OpenRouter (Gemini image model) or OpenAI (DALL-E) via per-agent ImageGenConfig.
 type CreateImageTool struct {
 	registry *providers.Registry
 }
@@ -77,42 +78,26 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]interface
 		aspectRatio = "1:1"
 	}
 
-	// Resolve provider from per-agent config or defaults
-	providerName, model := t.resolveConfig(ctx)
-
-	p, err := t.registry.Get(providerName)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("image generation provider %q not available", providerName))
+	// Extract per-agent config for backward compat
+	var perAgentProvider, perAgentModel string
+	if cfg := ImageGenConfigFromCtx(ctx); cfg != nil {
+		perAgentProvider = cfg.Provider
+		perAgentModel = cfg.Model
 	}
 
-	cp, ok := p.(credentialProvider)
-	if !ok {
-		return ErrorResult(fmt.Sprintf("provider %q does not expose API credentials for image generation", providerName))
+	chain := ResolveMediaProviderChain(ctx, "create_image", perAgentProvider, perAgentModel,
+		imageGenProviderPriority, imageGenModelDefaults, t.registry)
+
+	// Inject prompt and aspect_ratio into each chain entry's params
+	for i := range chain {
+		if chain[i].Params == nil {
+			chain[i].Params = make(map[string]any)
+		}
+		chain[i].Params["prompt"] = prompt
+		chain[i].Params["aspect_ratio"] = aspectRatio
 	}
 
-	slog.Info("create_image: calling image generation API",
-		"provider", providerName, "model", model, "aspect_ratio", aspectRatio)
-
-	// Route to the correct image generation endpoint per provider:
-	// - gemini: native Gemini generateContent API (responseModalities)
-	// - openrouter: OpenAI-compat /chat/completions with modalities
-	// - others (openai, etc.): /images/generations
-	var imageBytes []byte
-	var usage *providers.Usage
-	switch providerName {
-	case "gemini":
-		var genErr error
-		imageBytes, usage, genErr = t.callGeminiNativeImageGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt)
-		err = genErr
-	case "openrouter":
-		var genErr error
-		imageBytes, usage, genErr = t.callImageGenAPI(ctx, cp.APIKey(), cp.APIBase(), model, prompt, aspectRatio)
-		err = genErr
-	default:
-		var genErr error
-		imageBytes, usage, genErr = t.callStandardImageGenAPI(ctx, cp.APIKey(), cp.APIBase(), model, prompt)
-		err = genErr
-	}
+	chainResult, err := ExecuteWithChain(ctx, chain, t.registry, t.callProvider)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("image generation failed: %v", err))
 	}
@@ -127,83 +112,46 @@ func (t *CreateImageTool) Execute(ctx context.Context, args map[string]interface
 		return ErrorResult(fmt.Sprintf("failed to create output directory: %v", err))
 	}
 	imagePath := filepath.Join(dateDir, fmt.Sprintf("goclaw_gen_%d.png", time.Now().UnixNano()))
-	if err := os.WriteFile(imagePath, imageBytes, 0644); err != nil {
+	if err := os.WriteFile(imagePath, chainResult.Data, 0644); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to save generated image: %v", err))
 	}
 
 	result := &Result{ForLLM: fmt.Sprintf("MEDIA:%s", imagePath)}
 	result.Media = []bus.MediaFile{{Path: imagePath, MimeType: "image/png"}}
 	result.Deliverable = fmt.Sprintf("[Generated image: %s]\nPrompt: %s", filepath.Base(imagePath), prompt)
-	result.Provider = providerName
-	result.Model = model
-	if usage != nil {
-		result.Usage = usage
+	result.Provider = chainResult.Provider
+	result.Model = chainResult.Model
+	if chainResult.Usage != nil {
+		result.Usage = chainResult.Usage
 	}
 	return result
 }
 
-// resolveConfig returns the provider name and model to use for image generation.
-func (t *CreateImageTool) resolveConfig(ctx context.Context) (providerName, model string) {
-	// 1. Check per-agent ImageGenConfig from context (highest priority)
-	if cfg := ImageGenConfigFromCtx(ctx); cfg != nil {
-		if cfg.Provider != "" {
-			providerName = cfg.Provider
-		}
-		if cfg.Model != "" {
-			model = cfg.Model
-		}
-	}
+// callProvider dispatches to the correct image generation implementation based on provider type.
+func (t *CreateImageTool) callProvider(ctx context.Context, cp credentialProvider, providerName, model string, params map[string]any) ([]byte, *providers.Usage, error) {
+	prompt := GetParamString(params, "prompt", "")
+	aspectRatio := GetParamString(params, "aspect_ratio", "1:1")
 
-	// 2. Check global builtin_tools.settings (DB defaults)
-	if providerName == "" || model == "" {
-		if settings := BuiltinToolSettingsFromCtx(ctx); settings != nil {
-			if raw, ok := settings["create_image"]; ok && len(raw) > 0 {
-				var cfg struct {
-					Provider string `json:"provider"`
-					Model    string `json:"model"`
-				}
-				if json.Unmarshal(raw, &cfg) == nil && cfg.Provider != "" {
-					// DB settings are a provider+model pair — only use if provider is available
-					if _, err := t.registry.Get(cfg.Provider); err == nil {
-						if providerName == "" {
-							providerName = cfg.Provider
-						}
-						if model == "" && cfg.Model != "" {
-							model = cfg.Model
-						}
-					}
-				}
-			}
-		}
-	}
+	slog.Info("create_image: calling image generation API",
+		"provider", providerName, "model", model, "aspect_ratio", aspectRatio)
 
-	// 3. If provider not set, find first available from priority list
-	if providerName == "" {
-		for _, name := range imageGenProviderPriority {
-			if _, err := t.registry.Get(name); err == nil {
-				providerName = name
-				break
-			}
-		}
+	switch ProviderTypeFromName(providerName) {
+	case "gemini":
+		return t.callGeminiNativeImageGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, params)
+	case "openrouter":
+		return t.callImageGenAPI(ctx, cp.APIKey(), cp.APIBase(), model, prompt, aspectRatio, params)
+	case "minimax":
+		return callMinimaxImageGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, params)
+	case "dashscope":
+		return callDashScopeImageGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, params)
+	default:
+		return t.callStandardImageGenAPI(ctx, cp.APIKey(), cp.APIBase(), model, prompt, params)
 	}
-	if providerName == "" {
-		providerName = "openrouter" // fallback even if unavailable (error handled later)
-	}
-
-	// 4. If model not set, use default for this provider
-	if model == "" {
-		if m, ok := imageGenModelDefaults[providerName]; ok {
-			model = m
-		}
-	}
-
-	return providerName, model
 }
 
-// callImageGenAPI calls the OpenAI-compatible image generation endpoint.
-// Works with OpenRouter (modalities: ["image","text"]) and OpenAI (/images/generations).
-func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, model, prompt, aspectRatio string) ([]byte, *providers.Usage, error) {
-	// OpenRouter / OpenAI-compat: use chat completions with modalities
+// callImageGenAPI calls the OpenAI-compatible chat completions endpoint with image modalities.
+// Works with OpenRouter (modalities: ["image","text"]).
+func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, model, prompt, aspectRatio string, params map[string]any) ([]byte, *providers.Usage, error) {
 	body := map[string]interface{}{
 		"model": model,
 		"messages": []map[string]interface{}{
@@ -230,7 +178,7 @@ func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{} // timeout governed by chain context
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request: %w", err)
@@ -241,7 +189,6 @@ func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("read response: %w", err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("API error %d: %s", resp.StatusCode, truncateBytes(respBody, 500))
 	}
@@ -249,9 +196,8 @@ func (t *CreateImageTool) callImageGenAPI(ctx context.Context, apiKey, apiBase, 
 	return t.parseImageResponse(respBody)
 }
 
-// callStandardImageGenAPI uses the /images/generations endpoint (Gemini, OpenAI, and compatible providers).
-// This is the standard OpenAI-compatible image generation endpoint that returns b64_json data.
-func (t *CreateImageTool) callStandardImageGenAPI(ctx context.Context, apiKey, apiBase, model, prompt string) ([]byte, *providers.Usage, error) {
+// callStandardImageGenAPI uses the /images/generations endpoint (OpenAI and compatible providers).
+func (t *CreateImageTool) callStandardImageGenAPI(ctx context.Context, apiKey, apiBase, model, prompt string, params map[string]any) ([]byte, *providers.Usage, error) {
 	body := map[string]interface{}{
 		"model":           model,
 		"prompt":          prompt,
@@ -272,7 +218,7 @@ func (t *CreateImageTool) callStandardImageGenAPI(ctx context.Context, apiKey, a
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{} // timeout governed by chain context
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request: %w", err)
@@ -283,12 +229,10 @@ func (t *CreateImageTool) callStandardImageGenAPI(ctx context.Context, apiKey, a
 	if err != nil {
 		return nil, nil, fmt.Errorf("read response: %w", err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("API error %d: %s", resp.StatusCode, truncateBytes(respBody, 500))
 	}
 
-	// Parse OpenAI-compat images/generations response: {data: [{b64_json: "..."}]}
 	var imgResp struct {
 		Data []struct {
 			B64JSON string `json:"b64_json"`
@@ -310,9 +254,8 @@ func (t *CreateImageTool) callStandardImageGenAPI(ctx context.Context, apiKey, a
 }
 
 // callGeminiNativeImageGen uses the native Gemini generateContent API with responseModalities.
-// Gemini image models (gemini-2.5-flash-image, gemini-3.1-flash-image-preview) require this
-// endpoint — they don't support the OpenAI-compat /images/generations or /chat/completions.
-func (t *CreateImageTool) callGeminiNativeImageGen(ctx context.Context, apiKey, apiBase, model, prompt string) ([]byte, *providers.Usage, error) {
+// Gemini image models require this endpoint — they don't support OpenAI-compat endpoints.
+func (t *CreateImageTool) callGeminiNativeImageGen(ctx context.Context, apiKey, apiBase, model, prompt string, params map[string]any) ([]byte, *providers.Usage, error) {
 	// Derive native Gemini base from OpenAI-compat base (strip /openai suffix)
 	nativeBase := strings.TrimRight(apiBase, "/")
 	nativeBase = strings.TrimSuffix(nativeBase, "/openai")
@@ -339,7 +282,7 @@ func (t *CreateImageTool) callGeminiNativeImageGen(ctx context.Context, apiKey, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{} // timeout governed by chain context
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request: %w", err)
@@ -350,7 +293,6 @@ func (t *CreateImageTool) callGeminiNativeImageGen(ctx context.Context, apiKey, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("read response: %w", err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("API error %d: %s", resp.StatusCode, truncateBytes(respBody, 500))
 	}
@@ -426,7 +368,6 @@ func (t *CreateImageTool) parseImageResponse(respBody []byte) ([]byte, *provider
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return nil, nil, fmt.Errorf("parse response: %w", err)
 	}
-
 	if len(resp.Choices) == 0 {
 		return nil, nil, fmt.Errorf("no choices in response")
 	}
@@ -462,7 +403,6 @@ func (t *CreateImageTool) parseImageResponse(respBody []byte) ([]byte, *provider
 
 // decodeDataURL decodes a data:image/...;base64,... URL into raw bytes.
 func decodeDataURL(dataURL string) ([]byte, error) {
-	// Format: data:image/png;base64,iVBORw0KGgo...
 	idx := strings.Index(dataURL, ";base64,")
 	if idx < 0 {
 		return nil, fmt.Errorf("not a base64 data URL")

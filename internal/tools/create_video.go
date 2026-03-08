@@ -18,11 +18,12 @@ import (
 )
 
 // videoGenProviderPriority is the default order for video generation providers.
-var videoGenProviderPriority = []string{"gemini", "openrouter"}
+var videoGenProviderPriority = []string{"gemini", "minimax", "openrouter"}
 
 // videoGenModelDefaults maps provider names to default video generation models.
 var videoGenModelDefaults = map[string]string{
 	"gemini":     "veo-3.0-generate-preview",
+	"minimax":    "MiniMax-Hailuo-2.3",
 	"openrouter": "google/veo-3.0-generate-preview",
 }
 
@@ -94,29 +95,20 @@ func (t *CreateVideoTool) Execute(ctx context.Context, args map[string]interface
 		}
 	}
 
-	providerName, model := t.resolveConfig(ctx)
+	chain := ResolveMediaProviderChain(ctx, "create_video", "", "",
+		videoGenProviderPriority, videoGenModelDefaults, t.registry)
 
-	p, err := t.registry.Get(providerName)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("video generation provider %q not available", providerName))
+	// Inject prompt, duration, and aspect_ratio into each chain entry's params.
+	for i := range chain {
+		if chain[i].Params == nil {
+			chain[i].Params = make(map[string]any)
+		}
+		chain[i].Params["prompt"] = prompt
+		chain[i].Params["duration"] = duration
+		chain[i].Params["aspect_ratio"] = aspectRatio
 	}
 
-	cp, ok := p.(credentialProvider)
-	if !ok {
-		return ErrorResult(fmt.Sprintf("provider %q does not expose API credentials for video generation", providerName))
-	}
-
-	slog.Info("create_video: calling video generation API", "provider", providerName, "model", model, "duration", duration, "aspect_ratio", aspectRatio)
-
-	var videoBytes []byte
-	var usage *providers.Usage
-	switch providerName {
-	case "gemini":
-		videoBytes, usage, err = t.callGeminiVideoGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, duration, aspectRatio)
-	default:
-		// OpenRouter and others: try chat completions with VIDEO modality
-		videoBytes, usage, err = t.callChatVideoGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, duration, aspectRatio)
-	}
+	chainResult, err := ExecuteWithChain(ctx, chain, t.registry, t.callProvider)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("video generation failed: %v", err))
 	}
@@ -131,60 +123,38 @@ func (t *CreateVideoTool) Execute(ctx context.Context, args map[string]interface
 		return ErrorResult(fmt.Sprintf("failed to create output directory: %v", err))
 	}
 	videoPath := filepath.Join(dateDir, fmt.Sprintf("goclaw_gen_%d.mp4", time.Now().UnixNano()))
-	if err := os.WriteFile(videoPath, videoBytes, 0644); err != nil {
+	if err := os.WriteFile(videoPath, chainResult.Data, 0644); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to save generated video: %v", err))
 	}
 
 	result := &Result{ForLLM: fmt.Sprintf("MEDIA:%s", videoPath)}
 	result.Media = []bus.MediaFile{{Path: videoPath, MimeType: "video/mp4"}}
 	result.Deliverable = fmt.Sprintf("[Generated video: %s]\nPrompt: %s", filepath.Base(videoPath), prompt)
-	result.Provider = providerName
-	result.Model = model
-	if usage != nil {
-		result.Usage = usage
+	result.Provider = chainResult.Provider
+	result.Model = chainResult.Model
+	if chainResult.Usage != nil {
+		result.Usage = chainResult.Usage
 	}
 	return result
 }
 
-// resolveConfig returns the provider name and model for video generation.
-func (t *CreateVideoTool) resolveConfig(ctx context.Context) (providerName, model string) {
-	// 1. Check global builtin_tools.settings
-	if settings := BuiltinToolSettingsFromCtx(ctx); settings != nil {
-		if raw, ok := settings["create_video"]; ok && len(raw) > 0 {
-			var cfg struct {
-				Provider string `json:"provider"`
-				Model    string `json:"model"`
-			}
-			if json.Unmarshal(raw, &cfg) == nil && cfg.Provider != "" {
-				if _, err := t.registry.Get(cfg.Provider); err == nil {
-					providerName = cfg.Provider
-					model = cfg.Model
-				}
-			}
-		}
-	}
+// callProvider dispatches to the correct video generation implementation based on provider type.
+func (t *CreateVideoTool) callProvider(ctx context.Context, cp credentialProvider, providerName, model string, params map[string]any) ([]byte, *providers.Usage, error) {
+	prompt := GetParamString(params, "prompt", "")
+	duration := GetParamInt(params, "duration", 8)
+	aspectRatio := GetParamString(params, "aspect_ratio", "16:9")
 
-	// 2. Find first available from priority list
-	if providerName == "" {
-		for _, name := range videoGenProviderPriority {
-			if _, err := t.registry.Get(name); err == nil {
-				providerName = name
-				break
-			}
-		}
-	}
-	if providerName == "" {
-		providerName = "gemini"
-	}
+	slog.Info("create_video: calling video generation API",
+		"provider", providerName, "model", model, "duration", duration, "aspect_ratio", aspectRatio)
 
-	// 3. Default model
-	if model == "" {
-		if m, ok := videoGenModelDefaults[providerName]; ok {
-			model = m
-		}
+	switch ProviderTypeFromName(providerName) {
+	case "gemini":
+		return t.callGeminiVideoGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, duration, aspectRatio)
+	case "minimax":
+		return callMinimaxVideoGen(ctx, cp.APIKey(), cp.APIBase(), model, params)
+	default:
+		return t.callChatVideoGen(ctx, cp.APIKey(), cp.APIBase(), model, prompt, duration, aspectRatio)
 	}
-
-	return providerName, model
 }
 
 // callGeminiVideoGen uses the Gemini predictLongRunning API for Veo video generation.
@@ -219,7 +189,7 @@ func (t *CreateVideoTool) callGeminiVideoGen(ctx context.Context, apiKey, apiBas
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", apiKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{} // timeout governed by chain context
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request: %w", err)
@@ -334,7 +304,7 @@ func (t *CreateVideoTool) callGeminiVideoGen(ctx context.Context, apiKey, apiBas
 	}
 	dlReq.Header.Set("x-goog-api-key", apiKey)
 
-	dlClient := &http.Client{Timeout: 120 * time.Second}
+	dlClient := &http.Client{} // timeout governed by chain context
 	dlResp, err := dlClient.Do(dlReq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("download video: %w", err)
@@ -346,7 +316,7 @@ func (t *CreateVideoTool) callGeminiVideoGen(ctx context.Context, apiKey, apiBas
 		return nil, nil, fmt.Errorf("download error %d: %s", dlResp.StatusCode, truncateBytes(dlBody, 300))
 	}
 
-	videoBytes, err := io.ReadAll(dlResp.Body)
+	videoBytes, err := limitedReadAll(dlResp.Body, maxMediaDownloadBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read video data: %w", err)
 	}
@@ -379,7 +349,7 @@ func (t *CreateVideoTool) callChatVideoGen(ctx context.Context, apiKey, apiBase,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: 300 * time.Second}
+	client := &http.Client{} // timeout governed by chain context
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request: %w", err)
