@@ -602,6 +602,7 @@ func runGateway() {
 					AgentID:  meta.LeadAgent,
 					UserID:   meta.UserID,
 					Content:  leaderContent,
+					Metadata: map[string]string{"run_kind": tools.RunKindNotification},
 				})
 			} else {
 				msgBus.PublishOutbound(bus.OutboundMessage{
