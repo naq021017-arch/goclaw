@@ -70,20 +70,32 @@ var fileURLRe = regexp.MustCompile(`(/v1/(?:files|media)/[^\s)"'<>]+)`)
 
 // SignFileURLs finds all /v1/files/ and /v1/media/ URLs in content and appends
 // a signed ?ft= token. Used at delivery time (WS events, HTTP responses) to avoid
-// persisting tokens in session messages. Skips URLs that already have ?ft=.
+// persisting tokens in session messages. Strips any stale ?ft= tokens from legacy
+// data before re-signing with a fresh token.
 func SignFileURLs(content, secret string) string {
 	if secret == "" || !strings.Contains(content, "/v1/") {
 		return content
 	}
 	return fileURLRe.ReplaceAllStringFunc(content, func(url string) string {
-		if strings.Contains(url, "ft=") {
-			return url // already signed
-		}
-		ft := SignFileToken(url, secret, FileTokenTTL)
+		// Strip stale ft= token if present (legacy data may have persisted tokens).
+		cleanURL := stripFileToken(url)
+		ft := SignFileToken(cleanURL, secret, FileTokenTTL)
 		sep := "?"
-		if strings.Contains(url, "?") {
+		if strings.Contains(cleanURL, "?") {
 			sep = "&"
 		}
-		return url + sep + "ft=" + ft
+		return cleanURL + sep + "ft=" + ft
 	})
+}
+
+// staleTokenRe matches ?ft=... or &ft=... query parameter (greedy to end of URL segment).
+var staleTokenRe = regexp.MustCompile(`[?&]ft=[^\s)"'<>&]*`)
+
+// stripFileToken removes any ft= query parameter from a URL, cleaning up
+// legacy session data that may have persisted signed tokens.
+func stripFileToken(url string) string {
+	cleaned := staleTokenRe.ReplaceAllString(url, "")
+	// If we stripped ?ft=... (the only param), a trailing "?" might remain — remove it.
+	cleaned = strings.TrimRight(cleaned, "?&")
+	return cleaned
 }
