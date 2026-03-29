@@ -385,6 +385,37 @@ export function useChatMessages(sessionKey: string, agentId: string) {
           ]);
           break;
         }
+        // User-initiated cancellation — clear state, preserve partial content.
+        case "run.cancelled": {
+          cancelAnimationFrame(rafHandleRef.current);
+          rafPendingRef.current = false;
+
+          setIsRunning(false);
+          runIdRef.current = null;
+
+          const streamed = streamRef.current;
+          setStreamText(null);
+          setThinkingText(null);
+          setToolStream([]);
+          streamRef.current = "";
+          thinkingRef.current = "";
+          toolStreamRef.current = [];
+          activityRef.current = null;
+          setActivity(null);
+          blockRepliesRef.current = [];
+          setBlockReplies([]);
+
+          // Promote partial streamed text or reload history
+          if (streamed) {
+            setMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: streamed, timestamp: Date.now() },
+            ]);
+          } else {
+            loadHistory();
+          }
+          break;
+        }
       }
     },
     [loadHistory],

@@ -42,6 +42,8 @@ interface ChatState {
   setActivity: (activity: Activity | null) => void
   completeRun: (content: string, usage?: Message['usage'], media?: Message['media']) => void
   failRun: (error: string) => void
+  cancelRun: () => void
+  restoreRunning: (activity?: Activity | null) => void
   setMessages: (messages: Message[]) => void
   clear: () => void
 }
@@ -159,6 +161,12 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages: msgs, isRunning: false, activity: null, currentRunId: null }
     })
   },
+
+  // Cancellation: preserve partial streamed content, just clear running state.
+  cancelRun: () => set({ isRunning: false, activity: null, currentRunId: null }),
+
+  // Restore running state on session switch (without creating a new assistant message).
+  restoreRunning: (activity) => set({ isRunning: true, activity: activity ?? null }),
 
   setMessages: (messages) => set({ messages }),
   clear: () => set({ messages: [], isRunning: false, activity: null, currentRunId: null }),

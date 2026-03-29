@@ -124,7 +124,7 @@ export function TraceDetailDialog({ traceId, onClose, getTrace, onNavigateTrace,
     useCallback(
       (payload: unknown) => {
         const event = payload as AgentEventPayload;
-        if (event?.type === "run.completed" || event?.type === "run.failed") {
+        if (event?.type === "run.completed" || event?.type === "run.failed" || event?.type === "run.cancelled") {
           fetchTrace();
         }
       },

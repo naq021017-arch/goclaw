@@ -242,8 +242,12 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		})
 
 		if err != nil {
-			// Don't send error if context was cancelled (abort)
+			// Send cancelled response so the frontend's chat.send promise resolves
+			// instead of hanging until the 600s timeout.
 			if runCtx.Err() != nil {
+				client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+					"cancelled": true,
+				}))
 				return
 			}
 			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, err.Error()))

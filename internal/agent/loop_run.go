@@ -143,18 +143,35 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	if isChildTrace && l.traceCollector != nil && traceID != uuid.Nil {
 		status := store.TraceStatusCompleted
 		if err != nil {
-			status = store.TraceStatusError
+			if ctx.Err() != nil {
+				status = store.TraceStatusCancelled
+			} else {
+				status = store.TraceStatusError
+			}
 		}
-		l.traceCollector.SetTraceStatus(ctx, traceID, status)
+		traceCtx := ctx
+		if ctx.Err() != nil {
+			traceCtx = context.WithoutCancel(ctx)
+		}
+		l.traceCollector.SetTraceStatus(traceCtx, traceID, status)
 	}
 
 	if err != nil {
-		emitRun(AgentEvent{
-			Type:    protocol.AgentEventRunFailed,
-			AgentID: l.id,
-			RunID:   req.RunID,
-			Payload: map[string]string{"error": err.Error()},
-		})
+		// Distinguish user-initiated cancellation from real errors.
+		if ctx.Err() != nil {
+			emitRun(AgentEvent{
+				Type:    protocol.AgentEventRunCancelled,
+				AgentID: l.id,
+				RunID:   req.RunID,
+			})
+		} else {
+			emitRun(AgentEvent{
+				Type:    protocol.AgentEventRunFailed,
+				AgentID: l.id,
+				RunID:   req.RunID,
+				Payload: map[string]string{"error": err.Error()},
+			})
+		}
 		// Only finish trace for root runs; child traces don't own the trace lifecycle.
 		// Use background context when the run context is cancelled (/stop command)
 		// so the DB update still succeeds.

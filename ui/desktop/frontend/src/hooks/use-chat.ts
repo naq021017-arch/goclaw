@@ -184,6 +184,14 @@ export function useChat() {
           currentRunIdRef.current = null
           break
 
+        // User-initiated cancellation — preserve partial content, no error message.
+        case 'run.cancelled':
+          chunkBatcher.flush()
+          thinkingBatcher.flush()
+          useChatStore.getState().cancelRun()
+          currentRunIdRef.current = null
+          break
+
         // Backend sends: { attempt, maxAttempts, error }
         case 'run.retrying':
           setActivity({
@@ -350,6 +358,17 @@ export function useChat() {
     [ws, setMessages],
   )
 
+  // Abort the current run for the active session.
+  const abort = useCallback(async () => {
+    const sk = sessionKeyRef.current
+    if (!ws || !sk) return
+    try {
+      await ws.call('chat.abort', { sessionKey: sk })
+    } catch {
+      // ignore abort errors
+    }
+  }, [ws])
+
   // Reset streaming state + load history when session changes.
   // Messages are NOT cleared here — loadHistory() replaces them atomically.
   // Clearing would race with sendMessage's auto-session-creation flow.
@@ -373,8 +392,21 @@ export function useChat() {
     loadHistory(activeSessionKey).then(() => {
       if (cancelled) return
     })
+
+    // Restore session running state (mirrors web UI pattern).
+    // If user switches to a session with an active run, show the stop button.
+    ws?.call('chat.session_status', { sessionKey: activeSessionKey })
+      .then((raw: unknown) => {
+        if (cancelled) return
+        const res = raw as { isRunning?: boolean; activity?: { phase: string; tool?: string; iteration?: number } }
+        if (res?.isRunning) {
+          useChatStore.getState().restoreRunning(res.activity ?? null)
+        }
+      })
+      .catch(() => {})
+
     return () => { cancelled = true }
-  }, [activeSessionKey, loadHistory, chunkBatcher, thinkingBatcher])
+  }, [activeSessionKey, ws, loadHistory, chunkBatcher, thinkingBatcher])
 
   return {
     messages,
@@ -382,5 +414,6 @@ export function useChat() {
     activity,
     sendMessage,
     loadHistory,
+    abort,
   }
 }
