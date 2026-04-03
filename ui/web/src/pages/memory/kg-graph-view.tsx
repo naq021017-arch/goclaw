@@ -1,4 +1,4 @@
-import { useRef, useMemo, useCallback, useState, useEffect } from "react";
+import { useRef, useMemo, useCallback, useState, useEffect, useLayoutEffect } from "react";
 import ForceGraph2D, { type ForceGraphMethods } from "react-force-graph-2d";
 import { Maximize2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -29,18 +29,33 @@ export function KGGraphView({ entities: allEntities, relations: allRelations, on
   const [dimensions, setDimensions] = useState({ width: 600, height: 400 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [nodeLimit, setNodeLimit] = useState(DEFAULT_NODE_LIMIT);
+  const [ready, setReady] = useState(false);
 
   // Double-click detection refs
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickRef = useRef<string | null>(null);
 
-  // --- Container sizing via ResizeObserver ---
+  // --- Container sizing ---
+  // 1. Synchronous initial read before first paint to avoid wrong-size flash
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+      setDimensions({ width: el.clientWidth, height: el.clientHeight });
+      setReady(true);
+    }
+  }, []);
+
+  // 2. ResizeObserver for ongoing size changes (window resize, sidebar toggle)
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver(([entry]) => {
       if (!entry) return;
-      setDimensions({ width: entry.contentRect.width, height: entry.contentRect.height });
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) {
+        setDimensions({ width, height });
+        setReady(true);
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -175,15 +190,14 @@ export function KGGraphView({ entities: allEntities, relations: allRelations, on
     // No auto zoom — initial view from warmupTicks is already good
   }, []);
 
-  // --- Empty state ---
-  if (allEntities.length === 0) {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("kg.graphView.empty")}</div>;
-  }
+  const hasEntities = allEntities.length > 0;
 
   return (
     <div className="flex h-full flex-col rounded-md border overflow-hidden bg-background">
       <div ref={containerRef} className="min-h-0 flex-1 relative">
-        <ForceGraph2D
+        {!hasEntities ? (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("kg.graphView.empty")}</div>
+        ) : ready ? <ForceGraph2D
           ref={graphRef}
           width={dimensions.width}
           height={dimensions.height}
@@ -218,7 +232,7 @@ export function KGGraphView({ entities: allEntities, relations: allRelations, on
           enableNodeDrag={true}
           minZoom={0.1}
           maxZoom={8}
-        />
+        /> : null}
       </div>
 
       {/* Stats bar */}
