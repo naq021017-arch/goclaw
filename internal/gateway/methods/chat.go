@@ -174,6 +174,15 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		sessionKey = sessions.BuildWSSessionKey(params.AgentID, uuid.NewString())
 	}
 
+	// Ownership check: when resuming an existing session, verify the caller owns it.
+	// Skip for new sessions (Get returns nil) so first-message creation is not blocked.
+	if params.SessionKey != "" && !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, userID) {
+		if sess := m.sessions.Get(ctx, sessionKey); sess != nil && sess.UserID != userID {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "session")))
+			return
+		}
+	}
+
 	// Detach from HTTP request context so agent runs survive page navigation/reconnect.
 	// WithoutCancel preserves all context values (locale, user ID, etc.)
 	// but HTTP request cancellation no longer propagates.
