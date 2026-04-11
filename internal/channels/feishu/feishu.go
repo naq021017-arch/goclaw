@@ -35,19 +35,37 @@ const (
 // Channel connects to Feishu/Lark via native HTTP + WebSocket.
 type Channel struct {
 	*channels.BaseChannel
-	cfg            config.FeishuConfig
-	client         *LarkClient
-	botOpenID      string
-	senderCache    sync.Map // open_id → *senderCacheEntry
-	dedup          sync.Map // message_id → struct{}
-	reactions      sync.Map // chatID → *reactionState
-	docCache       *docCache // LRU+TTL cache for Lark docx raw_content lookups
-	groupAllowList []string  // Feishu-specific: per-group sender allowlist (separate from BaseChannel allowList)
-	stopCh         chan struct{}
-	httpServer     *http.Server
-	wsClient       *WSClient
+	cfg             config.FeishuConfig
+	client          *LarkClient
+	botOpenID       string
+	senderCache     sync.Map  // open_id → *senderCacheEntry
+	dedup           sync.Map  // message_id → struct{}
+	reactions       sync.Map  // chatID → *reactionState
+	docCache        *docCache // LRU+TTL cache for Lark docx raw_content lookups
+	agentStore      store.AgentStore            // optional — agent key → UUID lookup for writer commands
+	configPermStore store.ConfigPermissionStore // optional — group file writer ACL for /addwriter et al.
+	groupAllowList  []string                    // Feishu-specific: per-group sender allowlist (separate from BaseChannel allowList)
+	stopCh          chan struct{}
+	httpServer      *http.Server
+	wsClient        *WSClient
 	// pairingService, pairingDebounce, approvedGroups, groupHistory, historyLimit
 	// are inherited from channels.BaseChannel.
+}
+
+// Option configures optional Feishu channel dependencies, mirroring the
+// Telegram channel's pattern so the gateway wiring code can add stores
+// post-construction without breaking the New() signature.
+type Option func(*Channel)
+
+// WithAgentStore enables agent key → UUID resolution, required for writer
+// management commands (/addwriter, /writers, /removewriter).
+func WithAgentStore(s store.AgentStore) Option { return func(c *Channel) { c.agentStore = s } }
+
+// WithConfigPermStore enables the group file writer ACL used by writer
+// management commands. When nil, the commands fail with a clear "not
+// available" message instead of crashing.
+func WithConfigPermStore(s store.ConfigPermissionStore) Option {
+	return func(c *Channel) { c.configPermStore = s }
 }
 
 // Lark docs auto-fetch tunables. Kept as consts rather than config fields
@@ -72,7 +90,7 @@ type senderCacheEntry struct {
 }
 
 // New creates a new Feishu/Lark channel.
-func New(cfg config.FeishuConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, pendingStore store.PendingMessageStore) (*Channel, error) {
+func New(cfg config.FeishuConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, pendingStore store.PendingMessageStore, opts ...Option) (*Channel, error) {
 	if cfg.AppID == "" || cfg.AppSecret == "" {
 		return nil, fmt.Errorf("feishu app_id and app_secret are required")
 	}
@@ -101,6 +119,9 @@ func New(cfg config.FeishuConfig, msgBus *bus.MessageBus, pairingSvc store.Pairi
 	ch.SetPairingService(pairingSvc)
 	ch.SetGroupHistory(channels.MakeHistory(channels.TypeFeishu, pendingStore, base.TenantID()))
 	ch.SetHistoryLimit(historyLimit)
+	for _, opt := range opts {
+		opt(ch)
+	}
 	return ch, nil
 }
 

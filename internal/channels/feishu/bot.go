@@ -58,6 +58,15 @@ func (c *Channel) handleMessageEvent(ctx context.Context, event *MessageEvent) {
 		return
 	}
 
+	// 2a. Slash commands in DMs are rejected early with a clear hint so
+	// they never reach the agent pipeline (otherwise users typing
+	// "/addwriter" in a DM would waste an LLM turn). The full writer
+	// command router is gated behind group policy below at step 5a.
+	if mc.ChatType != "group" && c.isWriterSlashCommand(mc) {
+		c.sendCommandReply(ctx, mc, "This command only works in group chats.")
+		return
+	}
+
 	// 3. Resolve sender name (cached)
 	senderName := c.resolveSenderName(ctx, mc.SenderID)
 
@@ -83,6 +92,13 @@ func (c *Channel) handleMessageEvent(ctx context.Context, event *MessageEvent) {
 	if mc.ChatType == "group" {
 		if !c.checkGroupPolicy(ctx, mc.SenderID, mc.ChatID) {
 			slog.Debug("feishu group message rejected by policy", "sender_id", mc.SenderID, "chat_id", mc.ChatID)
+			return
+		}
+
+		// 5a. Writer management slash commands run AFTER the group policy
+		// gate so commands cannot bypass allowlists or pairing. Commands
+		// short-circuit the agent pipeline to avoid consuming LLM tokens.
+		if c.maybeHandleWriterCommand(ctx, mc) {
 			return
 		}
 

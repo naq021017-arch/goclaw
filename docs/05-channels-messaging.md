@@ -397,6 +397,29 @@ When a user pastes a Lark docx (document) URL in a message, the channel automati
 
 **Configuration**: No new config flags. Supported document type and cache tunables (8000 rune limit, 10-URL cap, 5-min TTL, 128-entry cache) are hardcoded.
 
+### Writer Management Commands
+
+Group chats support file-write permission management via slash commands. Permissions are scoped to the group via `group:feishu:<chatID>`. DM users who attempt these commands receive a hint that they only work in groups.
+
+**Commands** (group-only):
+
+| Command | Description | Requires Target | Permission |
+|---------|-------------|:---:|:---:|
+| `/addwriter <@user or reply>` | Grant file_writer permission to target user | Yes | Writers only |
+| `/removewriter <@user or reply>` | Revoke file_writer permission from target user | Yes | Writers only |
+| `/writers` | List current group writers with displayName | No | -- |
+
+**Target specification**: Commands require explicit identification via reply-to or @mention. Bare `/addwriter` without a target is rejected — prevents accidental privilege capture.
+
+**Bootstrap behavior**: Groups with no writers allow the first writer to grant themselves via `/addwriter @self` (explicit self-mention). This enables initial configuration without external admin intervention.
+
+**Authorization**:
+- Only existing writers can manage the writer list (enforce via `IsGroupFileWriter` check)
+- Last-writer guard: If removing a writer would leave zero writers, operation is rejected with user-facing message
+- Database errors are fail-open; security issues are logged as `security.writer_check_failed`
+
+**Implementation**: Timeout of 10 seconds bounds Feishu API calls. Requires `AgentStore` and `ConfigPermissionStore` wired to the Feishu channel via constructor options.
+
 ---
 
 ## 7. Discord

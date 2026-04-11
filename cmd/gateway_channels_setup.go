@@ -126,12 +126,18 @@ func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, ms
 	if cfg.Channels.Feishu.Enabled {
 		if cfg.Channels.Feishu.AppID == "" {
 			recordMissingConfig(channels.TypeFeishu, "Set channels.feishu.app_id in config.")
-		} else if f, err := feishu.New(cfg.Channels.Feishu, msgBus, pgStores.Pairing, nil); err != nil {
-			channelMgr.RecordFailure(channels.TypeFeishu, "", err)
-			slog.Error("failed to initialize feishu channel", "error", err)
 		} else {
-			channelMgr.RegisterChannel(channels.TypeFeishu, f)
-			slog.Info("feishu/lark channel enabled (config)")
+			feishuOpts := []feishu.Option{
+				feishu.WithAgentStore(pgStores.Agents),
+				feishu.WithConfigPermStore(pgStores.ConfigPermissions),
+			}
+			if f, err := feishu.New(cfg.Channels.Feishu, msgBus, pgStores.Pairing, nil, feishuOpts...); err != nil {
+				channelMgr.RecordFailure(channels.TypeFeishu, "", err)
+				slog.Error("failed to initialize feishu channel", "error", err)
+			} else {
+				channelMgr.RegisterChannel(channels.TypeFeishu, f)
+				slog.Info("feishu/lark channel enabled (config)")
+			}
 		}
 	}
 }
