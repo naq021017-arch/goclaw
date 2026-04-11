@@ -16,11 +16,14 @@ import (
 
 const (
 	graphAPIVersion = "v25.0"
-	graphAPIBase    = "https://graph.facebook.com"
 	maxRetries      = 3
 	// maxRetryAfterSec caps the Retry-After sleep to prevent goroutine stalls on abnormal values.
 	maxRetryAfterSec = 60
 )
+
+// graphAPIBase is the Graph API root. Declared as a variable so tests can
+// override it with an httptest.NewServer URL.
+var graphAPIBase = "https://graph.facebook.com"
 
 // fbIDPattern validates Facebook object IDs: numeric or "{num}_{num}" form (post IDs).
 var fbIDPattern = regexp.MustCompile(`^\d+(_\d+)?$`)
