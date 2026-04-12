@@ -195,9 +195,16 @@ func (h *VaultHandler) handleRescan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signal enrichment progress so WS subscribers see running=true immediately.
-	if h.enrichProgress != nil && (result.New+result.Updated) > 0 {
-		h.enrichProgress.Start(result.New+result.Updated, store.TenantIDFromContext(r.Context()))
+	// Start progress BEFORE publishing events so workers see running=true
+	// and AddDone calls are not dropped by the !running guard.
+	total := result.New + result.Updated
+	if h.enrichProgress != nil && total > 0 {
+		h.enrichProgress.Start(total, store.TenantIDFromContext(r.Context()))
+	}
+
+	// Now publish enrichment events — workers will call AddDone after Start.
+	for _, event := range result.PendingEvents {
+		h.eventBus.Publish(event)
 	}
 
 	writeJSON(w, http.StatusOK, result)

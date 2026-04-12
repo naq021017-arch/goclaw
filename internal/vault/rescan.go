@@ -30,6 +30,11 @@ type RescanResult struct {
 	Skipped   int  `json:"skipped"`
 	Errors    int  `json:"errors"`
 	Truncated bool `json:"truncated"`
+
+	// PendingEvents holds enrichment events collected during scan.
+	// Caller must publish these AFTER calling progress.Start(total)
+	// to avoid race between event workers and progress tracking.
+	PendingEvents []eventbus.DomainEvent `json:"-"`
 }
 
 // RescanWorkspace walks the tenant workspace and registers missing or changed
@@ -107,9 +112,10 @@ func RescanWorkspace(ctx context.Context, params RescanParams, vs store.VaultSto
 			result.New++
 		}
 
-		// Publish enrichment event. AgentID in payload stays string for serialization.
+		// Collect enrichment events — published AFTER the loop so the caller
+		// can call progress.Start(total) before workers receive events.
 		if bus != nil {
-			bus.Publish(eventbus.DomainEvent{
+			result.PendingEvents = append(result.PendingEvents, eventbus.DomainEvent{
 				ID:        uuid.Must(uuid.NewV7()).String(),
 				Type:      eventbus.EventVaultDocUpserted,
 				SourceID:  doc.ID + ":" + hash,

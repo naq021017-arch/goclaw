@@ -105,14 +105,10 @@ func (w *enrichWorker) Handle(ctx context.Context, event eventbus.DomainEvent) e
 	}
 	w.dedupMu.Unlock()
 
-	// Batch key: tenant + agent for agent-scoped docs.
-	// Team/shared docs (empty AgentID) batch together per tenant so bulk rescan
-	// benefits from chunked processing instead of 1-doc-per-queue.
-	batchScope := payload.AgentID
-	if batchScope == "" {
-		batchScope = "_shared"
-	}
-	key := payload.TenantID + ":" + batchScope
+	// Batch key: tenant-only. All docs for the same tenant share one queue
+	// so a single processBatch goroutine drains everything in order.
+	// Agent/team scope is carried in the payload for classify phase.
+	key := payload.TenantID
 	if !w.queue.Enqueue(key, payload) {
 		return nil // another goroutine already processing this agent's queue
 	}
@@ -132,26 +128,22 @@ type enriched struct {
 // Items are chunked into enrichBatchSize groups so bulk rescan doesn't
 // overwhelm the LLM provider with hundreds of concurrent requests.
 func (w *enrichWorker) processBatch(ctx context.Context, key string) {
-	w.progress.TrackBatch()
-	var totalQueued int
-
 	for {
 		items := w.queue.Drain(key)
 		if len(items) == 0 {
 			if w.queue.TryFinish(key) {
-				w.progress.MarkBatchDone()
 				return
 			}
 			continue
 		}
-
-		totalQueued += len(items)
 
 		// Process in chunks of enrichBatchSize, up to enrichMaxConcurrent in parallel.
 		var wg sync.WaitGroup
 		for start := 0; start < len(items); start += enrichBatchSize {
 			end := min(start+enrichBatchSize, len(items))
 			if err := w.sem.Acquire(ctx, 1); err != nil {
+				// Context cancelled — count remaining as done so progress completes.
+				w.progress.AddDone(len(items) - start)
 				break
 			}
 			wg.Add(1)
@@ -165,7 +157,6 @@ func (w *enrichWorker) processBatch(ctx context.Context, key string) {
 		wg.Wait()
 
 		if w.queue.TryFinish(key) {
-			w.progress.MarkBatchDone()
 			return
 		}
 	}

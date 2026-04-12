@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	classifyMaxTokens       = 2048
+	classifyMaxTokens       = 1024
 	classifyTemperature     = 0.1
 	classifyCtxMaxLen       = 256 // max context string length stored in DB
 	classifySummaryMaxChars = 300 // max summary chars in prompt (validated: 300 for accuracy)
 	classifyMaxSourceDocs   = 20  // max source docs per classifyLinks call (validated: cap unbounded time)
+	classifyChunkSize       = 5   // candidates per LLM call to fit response within max_tokens
 )
 
 // validClassifyTypes — accepted link types stored directly in DB (aligned with UI vault-link-dialog.tsx).
@@ -56,49 +57,55 @@ func (w *enrichWorker) classifyLinks(ctx context.Context, tenantID, agentID stri
 
 	for sourceDocID, pairs := range candidates {
 		source := pairs[0].Source
-		candidateDocs := make([]classifyDoc, len(pairs))
+		allCandidates := make([]classifyDoc, len(pairs))
 		for i, p := range pairs {
-			candidateDocs[i] = p.Candidate
+			allCandidates[i] = p.Candidate
 		}
 
-		system, user := buildClassifyPrompt(source, candidateDocs)
-		raw, err := w.callClassifyWithRetry(ctx, system, user)
-		if err != nil {
-			slog.Warn("vault.classify: llm_failed", "doc", sourceDocID, "err", err)
-			continue // SKIP fallback
-		}
-
-		parsed, err := parseClassifyResponse(raw, len(candidateDocs))
-		if err != nil {
-			hint := fmt.Sprintf("\n\nPrevious response was invalid JSON (error: %s). Output ONLY a valid JSON array.", err.Error())
-			raw2, err2 := w.callClassifyWithRetry(ctx, system, user+hint)
-			if err2 != nil {
-				slog.Warn("vault.classify: retry_parse_failed", "doc", sourceDocID, "err", err2)
-				continue
-			}
-			parsed, err = parseClassifyResponse(raw2, len(candidateDocs))
-			if err != nil {
-				slog.Warn("vault.classify: parse_still_failed", "doc", sourceDocID, "err", err)
-				continue
-			}
-		}
-
-		// Collect valid links (collect-then-write pattern).
+		// Chunk candidates to keep LLM response within max_tokens.
 		var newLinks []store.VaultLink
-		for _, r := range parsed {
-			if r.Type == "SKIP" || !validClassifyTypes[r.Type] {
+		for chunkStart := 0; chunkStart < len(allCandidates); chunkStart += classifyChunkSize {
+			chunkEnd := min(chunkStart+classifyChunkSize, len(allCandidates))
+			chunk := allCandidates[chunkStart:chunkEnd]
+
+			system, user := buildClassifyPrompt(source, chunk)
+			raw, err := w.callClassifyWithRetry(ctx, system, user)
+			if err != nil {
+				slog.Warn("vault.classify: llm_failed", "doc", sourceDocID, "chunk", chunkStart, "err", err)
 				continue
 			}
-			linkCtx := r.Ctx
-			if len(linkCtx) > classifyCtxMaxLen {
-				linkCtx = string([]rune(linkCtx)[:classifyCtxMaxLen])
+
+			parsed, err := parseClassifyResponse(raw, len(chunk))
+			if err != nil {
+				hint := fmt.Sprintf("\n\nPrevious response was invalid JSON (error: %s). Output ONLY a valid JSON array.", err.Error())
+				raw2, err2 := w.callClassifyWithRetry(ctx, system, user+hint)
+				if err2 != nil {
+					slog.Warn("vault.classify: retry_parse_failed", "doc", sourceDocID, "err", err2)
+					continue
+				}
+				parsed, err = parseClassifyResponse(raw2, len(chunk))
+				if err != nil {
+					slog.Warn("vault.classify: parse_still_failed", "doc", sourceDocID, "err", err)
+					continue
+				}
 			}
-			newLinks = append(newLinks, store.VaultLink{
-				FromDocID: sourceDocID,
-				ToDocID:   candidateDocs[r.Idx-1].DocID, // idx is 1-based, validated by parseClassifyResponse
-				LinkType:  r.Type,
-				Context:   linkCtx,
-			})
+
+			for _, r := range parsed {
+				if r.Type == "SKIP" || !validClassifyTypes[r.Type] {
+					continue
+				}
+				linkCtx := r.Ctx
+				if len(linkCtx) > classifyCtxMaxLen {
+					linkCtx = string([]rune(linkCtx)[:classifyCtxMaxLen])
+				}
+				// r.Idx is 1-based within chunk; map back to original candidate.
+				newLinks = append(newLinks, store.VaultLink{
+					FromDocID: sourceDocID,
+					ToDocID:   chunk[r.Idx-1].DocID,
+					LinkType:  r.Type,
+					Context:   linkCtx,
+				})
+			}
 		}
 
 		// Only replace old links if LLM produced valid replacements (avoid data loss on all-SKIP).
@@ -113,12 +120,16 @@ func (w *enrichWorker) classifyLinks(ctx context.Context, tenantID, agentID stri
 	}
 }
 
-func (w *enrichWorker) gatherCandidates(ctx context.Context, tenantID, agentID string, results []enriched) map[string][]candidatePair {
+func (w *enrichWorker) gatherCandidates(ctx context.Context, tenantID, _ string, results []enriched) map[string][]candidatePair {
 	seen := make(map[string]bool)
 	out := make(map[string][]candidatePair)
 
 	for _, r := range results {
-		neighbors, err := w.vault.FindSimilarDocs(ctx, tenantID, agentID, r.payload.DocID, enrichSimilarityLimit)
+		// Search across ALL docs in the tenant (empty agentID = no agent filter).
+		// Cross-agent links are created freely; access control is enforced at
+		// query time so agents only see their own docs. Pre-built cross-agent
+		// links enable future vault sharing without re-enrichment.
+		neighbors, err := w.vault.FindSimilarDocs(ctx, tenantID, "", r.payload.DocID, enrichSimilarityLimit)
 		if err != nil {
 			slog.Warn("vault.classify: find_similar", "doc", r.payload.DocID, "err", err)
 			continue

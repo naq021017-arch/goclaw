@@ -3,7 +3,6 @@ package vault
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 )
 
@@ -25,14 +24,19 @@ const classifySystemPrompt = `You classify relationships between documents in a 
 - contradicts: A conflicts with or opposes B's content
 
 ## Rules
-- Output ONLY a valid JSON array, no other text
+- Respond with EXACTLY one JSON entry per candidate, no markdown fences, no explanation
 - Use SKIP when documents are similar but have no meaningful relationship
 - Prefer specific types (reference, depends_on) over generic (related)
-- Each candidate classified independently
-- Keep ctx descriptions under 60 words
+- Keep ctx under 30 words
 
 ## Output Format
-[{"idx":1,"type":"reference","ctx":"mentions OAuth config for setup"},{"idx":2,"type":"SKIP"}]`
+[
+  {"idx":1,"type":"reference","ctx":"mentions OAuth config"},
+  {"idx":2,"type":"SKIP"},
+  {"idx":3,"type":"extends","ctx":"adds error handling details"},
+  {"idx":4,"type":"SKIP"},
+  {"idx":5,"type":"depends_on","ctx":"requires auth middleware"}
+]`
 
 // buildClassifyPrompt formats the system and user prompts for classify LLM call.
 func buildClassifyPrompt(source classifyDoc, candidates []classifyDoc) (system, user string) {
@@ -50,7 +54,6 @@ func buildClassifyPrompt(source classifyDoc, candidates []classifyDoc) (system, 
 // Uses partial success model: invalid entries filtered silently, error only on total unmarshal failure.
 func parseClassifyResponse(raw string, count int) ([]classifyResult, error) {
 	raw = strings.TrimSpace(raw)
-	// Strip code fences.
 	raw = strings.TrimPrefix(raw, "```json")
 	raw = strings.TrimPrefix(raw, "```")
 	raw = strings.TrimSuffix(raw, "```")
@@ -61,17 +64,14 @@ func parseClassifyResponse(raw string, count int) ([]classifyResult, error) {
 		return nil, fmt.Errorf("json unmarshal: %w", err)
 	}
 
-	// Filter invalid entries (partial success).
 	valid := results[:0]
 	for _, r := range results {
 		if r.Idx < 1 || r.Idx > count {
-			slog.Debug("vault.classify: idx out of range", "idx", r.Idx, "count", count)
 			continue
 		}
 		if r.Type != "SKIP" && !validClassifyTypes[r.Type] {
 			continue
 		}
-		// Truncate context.
 		if len(r.Ctx) > classifyCtxMaxLen {
 			r.Ctx = string([]rune(r.Ctx)[:classifyCtxMaxLen])
 		}

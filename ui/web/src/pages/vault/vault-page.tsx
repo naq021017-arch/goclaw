@@ -137,7 +137,7 @@ export function VaultPage() {
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button size="sm" variant="outline" onClick={() => rescan()} disabled={rescanPending || enriching}>
+                <Button size="sm" variant="outline" onClick={async () => { await rescan(); loadRoot(); }} disabled={rescanPending || enriching}>
                   {(rescanPending || enriching) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderSync className="h-3.5 w-3.5" />}
                 </Button>
               </TooltipTrigger>
