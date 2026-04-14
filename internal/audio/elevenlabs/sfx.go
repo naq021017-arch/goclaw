@@ -35,10 +35,7 @@ func (p *SFXProvider) Name() string { return "elevenlabs" }
 // GenerateSFX produces an MP3 sound effect from opts.Prompt. Duration is
 // capped at sfxMaxDurationSeconds (ElevenLabs limit).
 func (p *SFXProvider) GenerateSFX(ctx context.Context, opts audio.SFXOptions) (*audio.AudioResult, error) {
-	duration := opts.Duration
-	if duration > sfxMaxDurationSeconds {
-		duration = sfxMaxDurationSeconds
-	}
+	duration := min(opts.Duration, sfxMaxDurationSeconds)
 
 	body := map[string]any{
 		"text":             opts.Prompt,
@@ -68,5 +65,6 @@ func (p *SFXProvider) GenerateSFX(ctx context.Context, opts audio.SFXOptions) (*
 		Audio:     audioBytes,
 		Extension: "mp3",
 		MimeType:  "audio/mpeg",
+		Provider:  "elevenlabs",
 	}, nil
 }
