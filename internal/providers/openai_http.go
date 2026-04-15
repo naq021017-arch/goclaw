@@ -44,6 +44,8 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body any) (io.ReadCloser
 		httpReq.Header.Set("X-Title", p.siteTitle)
 	}
 
+	httpReq.Header.Set("User-Agent", "KimiCLI/0.77")
+
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("%s: request failed: %w", p.name, err)
