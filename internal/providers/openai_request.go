@@ -104,6 +104,9 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 				}
 			}
 			msg["tool_calls"] = toolCalls
+			if openAIWireAssistantReasoningContent(model) {
+				msg["reasoning_content"] = "calling tool"
+			}
 		}
 
 		if m.ToolCallID != "" {

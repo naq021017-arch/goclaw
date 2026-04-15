@@ -15,8 +15,8 @@ type openAIChoice struct {
 type openAIMessage struct {
 	Role             string           `json:"role"`
 	Content          string           `json:"content"`
-	ReasoningContent string           `json:"reasoning_content,omitempty"`
-	Reasoning        string           `json:"reasoning,omitempty"` // Ollama alias for reasoning_content
+	ReasoningContent string           `json:"reasoning_content"`
+	Reasoning        string           `json:"reasoning"` // Ollama alias for reasoning_content
 	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
