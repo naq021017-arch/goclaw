@@ -20,6 +20,7 @@ type ChannelsConfig struct {
 	Zalo              ZaloConfig               `json:"zalo"`
 	ZaloPersonal      ZaloPersonalConfig       `json:"zalo_personal"`
 	Feishu            FeishuConfig             `json:"feishu"`
+	QQ                QQConfig                 `json:"qq"`
 	PendingCompaction *PendingCompactionConfig `json:"pending_compaction,omitempty"` // global pending message compaction settings
 }
 
@@ -192,6 +193,13 @@ type FeishuConfig struct {
 	STTTenantID       string              `json:"stt_tenant_id,omitempty"`
 	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"`
 	VoiceAgentID      string              `json:"voice_agent_id,omitempty"`
+}
+
+type QQConfig struct {
+	Enabled   bool                `json:"enabled"`
+	AppID     string              `json:"app_id"`
+	AppSecret string              `json:"app_secret"`
+	AllowFrom FlexibleStringSlice `json:"allow_from"`
 }
 
 // ProvidersConfig maps provider name to its config.
