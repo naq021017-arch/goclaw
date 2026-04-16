@@ -170,6 +170,7 @@ func wireExtras(
 		SandboxEnabled:         sandboxEnabled,
 		SandboxContainerDir:    sandboxContainerDir,
 		SandboxWorkspaceAccess: sandboxWorkspaceAccess,
+		ShellDenyGroups:        appCfg.Tools.ShellDenyGroups,
 		AgentLinkStore:         stores.AgentLinks,
 		TeamStore:              stores.Teams,
 		DataDir:                workspace,

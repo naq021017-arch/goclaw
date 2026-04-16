@@ -185,7 +185,7 @@ func (s *Server) BuildMux() *http.ServeMux {
 		if s.cfg.Gateway.Token != "" {
 			bridgeHandler := mcpbridge.NewBridgeServer(s.tools, "1.0.0", s.msgBus)
 			handler := tokenAuthMiddleware(s.cfg.Gateway.Token,
-				bridgeContextMiddleware(s.cfg.Gateway.Token, s.agentStore, bridgeHandler))
+				bridgeContextMiddleware(s.cfg.Gateway.Token, s.agentStore, s.cfg.Tools.ShellDenyGroups, bridgeHandler))
 			mux.Handle("/mcp/bridge", handler)
 		} else {
 			slog.Warn("security.mcp_bridge_disabled: no gateway token configured, MCP bridge is disabled")
@@ -212,7 +212,7 @@ func (s *Server) BuildMux() *http.ServeMux {
 // access agent/user scope and resolve workspace-relative paths.
 // When a gateway token is configured, the context headers must be accompanied by
 // a valid X-Bridge-Sig HMAC to prevent forgery.
-func bridgeContextMiddleware(gatewayToken string, agentStore store.AgentStore, next http.Handler) http.Handler {
+func bridgeContextMiddleware(gatewayToken string, agentStore store.AgentStore, globalShellDenyGroups map[string]bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		agentIDStr := r.Header.Get("X-Agent-ID")
@@ -248,14 +248,22 @@ func bridgeContextMiddleware(gatewayToken string, agentStore store.AgentStore, n
 				if id, err := uuid.Parse(agentIDStr); err == nil {
 					ctx = store.WithAgentID(ctx, id)
 
-					// Inject per-agent shell deny group overrides so the exec tool
+					// Inject shell deny group overrides so the exec tool
 					// respects the same policy as the normal agent loop.
+					// Merge global defaults with per-agent overrides (agent wins).
 					if agentStore != nil {
 						ag, err := agentStore.GetByIDUnscoped(ctx, id)
 						if err == nil && ag != nil {
 							groups := ag.ParseShellDenyGroups()
-							if groups != nil {
-								ctx = store.WithShellDenyGroups(ctx, groups)
+							merged := make(map[string]bool, len(globalShellDenyGroups)+len(groups))
+							for k, v := range globalShellDenyGroups {
+								merged[k] = v
+							}
+							for k, v := range groups {
+								merged[k] = v
+							}
+							if len(merged) > 0 {
+								ctx = store.WithShellDenyGroups(ctx, merged)
 							}
 						}
 					}

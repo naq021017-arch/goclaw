@@ -59,6 +59,7 @@ type ResolverDeps struct {
 	SandboxEnabled         bool
 	SandboxContainerDir    string
 	SandboxWorkspaceAccess string
+	ShellDenyGroups        map[string]bool // global shell deny group defaults
 
 	// Inter-agent delegation
 	AgentLinkStore store.AgentLinkStore
@@ -496,7 +497,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			SkillEvolve:            ag.AgentType == store.AgentTypePredefined && ag.ParseSkillEvolve(),
 			SkillNudgeInterval:     ag.ParseSkillNudgeInterval(),
 			WorkspaceSharing:       ag.ParseWorkspaceSharing(),
-			ShellDenyGroups:        ag.ParseShellDenyGroups(),
+			ShellDenyGroups:        mergeShellDenyGroups(deps.ShellDenyGroups, ag.ParseShellDenyGroups()),
 			ConfigPermStore:        deps.ConfigPermStore,
 			TeamStore:              deps.TeamStore,
 			SecureCLIStore:         deps.SecureCLIStore,
@@ -584,4 +585,20 @@ func derefInt(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// mergeShellDenyGroups merges global defaults with per-agent overrides.
+// Per-agent overrides take priority. Returns nil if neither side has config.
+func mergeShellDenyGroups(global, agent map[string]bool) map[string]bool {
+	if len(global) == 0 && len(agent) == 0 {
+		return nil
+	}
+	merged := make(map[string]bool, len(global)+len(agent))
+	for k, v := range global {
+		merged[k] = v
+	}
+	for k, v := range agent {
+		merged[k] = v
+	}
+	return merged
 }
