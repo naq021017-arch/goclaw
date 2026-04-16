@@ -65,6 +65,13 @@ function modelPatch(provider: string, value: string): [ProviderKey, Partial<TtsP
   }
 }
 
+// Check if provider credentials are saved (to show lower sections)
+function isCredentialsSaved(provider: string, tts: TtsConfig): boolean {
+  if (provider === "edge") return true; // Edge doesn't require API key
+  const cfg = tts[provider as ProviderKey];
+  return !!cfg?.api_key;
+}
+
 export function TtsPage() {
   const { t } = useTranslation("tts");
   const { t: tc } = useTranslation("common");
@@ -139,10 +146,13 @@ export function TtsPage() {
           draft={draft}
           onUpdate={updateProvider}
           testConnection={testConnection}
+          onSave={handleSave}
+          saving={saving}
+          dirty={dirty}
         />
       )}
 
-      {draft.provider && (
+      {draft.provider && isCredentialsSaved(draft.provider, tts) && (
         <VoiceModelSection
           provider={draft.provider}
           voiceId={getVoiceId(draft)}
@@ -152,7 +162,7 @@ export function TtsPage() {
         />
       )}
 
-      {draft.provider && (
+      {draft.provider && isCredentialsSaved(draft.provider, tts) && (
         <TestPlayground
           provider={draft.provider}
           voiceId={getVoiceId(draft)}

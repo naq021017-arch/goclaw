@@ -1,7 +1,7 @@
 /**
  * Behavior section — collapsible "Advanced settings" panel.
  * Contains: auto mode, reply mode, max_length, timeout_ms.
- * Collapsed by default to reduce visual noise for the common 4-step flow.
+ * Expanded by default for visibility; users can collapse if needed.
  * Uses local useState + chevron (no Radix Collapsible dependency needed).
  */
 import { useState } from "react";
@@ -24,7 +24,7 @@ interface Props {
 
 export function BehaviorSection({ draft, onUpdate }: Props) {
   const { t } = useTranslation("tts");
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
 
   return (
     <Card>

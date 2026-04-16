@@ -6,7 +6,7 @@
  */
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { FlaskConical } from "lucide-react";
+import { FlaskConical, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,9 +23,12 @@ interface Props {
     patch: Partial<TtsProviderConfig>,
   ) => void;
   testConnection: (params: TestConnectionParams) => Promise<TestConnectionResult>;
+  onSave: () => Promise<void>;
+  saving?: boolean;
+  dirty?: boolean;
 }
 
-export function CredentialsSection({ provider, draft, onUpdate, testConnection }: Props) {
+export function CredentialsSection({ provider, draft, onUpdate, testConnection, onSave, saving, dirty }: Props) {
   const { t } = useTranslation("tts");
   const [testing, setTesting] = useState(false);
 
@@ -128,17 +131,29 @@ export function CredentialsSection({ provider, draft, onUpdate, testConnection }
           </>
         )}
 
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-9 gap-1.5"
-          disabled={testing}
-          onClick={handleTestConnection}
-        >
-          <FlaskConical className="h-3.5 w-3.5" />
-          {testing ? t("testConnection.testing", "Testing…") : t("testConnection.label", "Test connection")}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 gap-1.5"
+            disabled={testing}
+            onClick={handleTestConnection}
+          >
+            <FlaskConical className="h-3.5 w-3.5" />
+            {testing ? t("testConnection.testing", "Testing…") : t("testConnection.label", "Test connection")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-9 gap-1.5"
+            disabled={saving || !dirty}
+            onClick={onSave}
+          >
+            <Save className="h-3.5 w-3.5" />
+            {saving ? t("saving") : t("save")}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

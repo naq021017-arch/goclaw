@@ -236,7 +236,7 @@ function DynamicVoicePicker({
           </div>
         ) : filtered.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            {voices.length === 0 ? t("voice_no_voices") : search ? t("voice_no_voices") : t("voice_loading")}
+            {voices.length === 0 ? t("voice_save_config_first") : search ? t("voice_no_voices") : t("voice_loading")}
           </p>
         ) : (
           filtered.map((voice) => (

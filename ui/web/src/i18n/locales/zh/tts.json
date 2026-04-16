@@ -38,6 +38,7 @@
   "voice_preview": "试听",
   "voice_stop_preview": "停止",
   "voice_no_voices": "暂无声音",
+  "voice_save_config_first": "请先保存 API Key 以加载声音",
   "voice_loading": "加载声音中…",
   "voice_preview_error": "试听失败 — 正在刷新",
   "model_label": "模型",

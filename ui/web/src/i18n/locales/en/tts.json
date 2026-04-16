@@ -69,6 +69,7 @@
   "voice_preview": "Preview",
   "voice_stop_preview": "Stop",
   "voice_no_voices": "No voices available",
+  "voice_save_config_first": "Save API key first to load voices",
   "voice_loading": "Loading voices…",
   "voice_preview_error": "Preview failed — refreshing list",
   "model_label": "Model",
