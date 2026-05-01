@@ -71,6 +71,10 @@ func builtinToolSeedData() []store.BuiltinToolDef {
 			Requires: []string{"tts_provider"},
 			Metadata: json.RawMessage(`{"config_hint":"Config → TTS"}`),
 		},
+		{Name: "stt", DisplayName: "Speech-to-Text", Description: "Transcribe voice/audio messages to text using ElevenLabs Scribe or a proxy service", Category: "media", Enabled: true,
+			Requires: []string{"stt_provider"},
+			Metadata: json.RawMessage(`{"config_hint":"Config → Audio → STT"}`),
+		},
 
 		// browser
 		{Name: "browser", DisplayName: "Browser", Description: "Automate browser interactions: navigate pages, click elements, fill forms, take screenshots", Category: "browser", Enabled: true,
@@ -86,6 +90,7 @@ func builtinToolSeedData() []store.BuiltinToolDef {
 
 		// messaging
 		{Name: "message", DisplayName: "Message", Description: "Send a proactive message to a user on a connected channel (Telegram, Discord, etc.)", Category: "messaging", Enabled: true},
+		{Name: "send_file", DisplayName: "Send File", Description: "Send an existing workspace file as an attachment in the current chat (does not create or modify the file)", Category: "messaging", Enabled: true},
 
 		// scheduling
 		{Name: "cron", DisplayName: "Cron Scheduler", Description: "Schedule or manage recurring tasks using cron expressions, at-times, or intervals", Category: "scheduling", Enabled: true,

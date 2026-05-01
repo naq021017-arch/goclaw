@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"sync"
 
 	"github.com/google/uuid"
@@ -255,12 +256,8 @@ func BuiltinToolSettingsFromCtx(ctx context.Context) BuiltinToolSettings {
 
 	// Both tiers present: layer tenant override on top of global defaults.
 	merged := make(BuiltinToolSettings, len(global)+len(tenant))
-	for k, v := range global {
-		merged[k] = v
-	}
-	for k, v := range tenant {
-		merged[k] = v
-	}
+	maps.Copy(merged, global)
+	maps.Copy(merged, tenant)
 	return merged
 }
 
@@ -400,6 +397,27 @@ func ToolTeamWorkspaceFromCtx(ctx context.Context) string {
 	}
 	if rc := store.RunContextFromCtx(ctx); rc != nil {
 		return rc.TeamWorkspace
+	}
+	return ""
+}
+
+// --- Team root (team-wide shared root, above UserChatLayer) ---
+
+const ctxTeamRoot toolContextKey = "tool_team_root"
+
+// WithToolTeamRoot stores the team-wide root directory (e.g. /app/workspace/teams/<team_id>/)
+// without the UserChatLayer suffix. Any agent belonging to the team (leader or member) sees
+// this path as an allowed prefix so file tools can read across chat/user scopes within the
+// same team. Per-chat write isolation is preserved by still resolving writes against the
+// agent's own workspace first; this key only widens the allowed-prefix set for path checks.
+func WithToolTeamRoot(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, ctxTeamRoot, dir)
+}
+
+// ToolTeamRootFromCtx returns the team-wide root directory, or empty if not set.
+func ToolTeamRootFromCtx(ctx context.Context) string {
+	if v, _ := ctx.Value(ctxTeamRoot).(string); v != "" {
+		return v
 	}
 	return ""
 }

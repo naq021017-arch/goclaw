@@ -16,7 +16,7 @@ var schemaSQL string
 
 // SchemaVersion is the current SQLite schema version.
 // Bump this when adding new migration steps below.
-const SchemaVersion = 17
+const SchemaVersion = 26
 
 // migrations maps version → SQL to apply when upgrading FROM that version.
 // schema.sql always represents the LATEST full schema (for fresh DBs).
@@ -438,7 +438,195 @@ CREATE INDEX IF NOT EXISTS idx_vault_docs_delegation
 
 	// Version 16 → 17: path prefix index for vault tree lazy-load queries.
 	16: `CREATE INDEX IF NOT EXISTS idx_vault_docs_path_prefix ON vault_documents(tenant_id, path);`,
+
+	// Version 17 → 18: seed STT builtin_tools row.
+	17: `INSERT INTO builtin_tools (name, display_name, description, category, enabled, settings)
+VALUES ('stt', 'Speech-to-Text', 'Transcribe voice/audio messages to text using ElevenLabs Scribe or a proxy service', 'media', 1, '{}')
+ON CONFLICT (name) DO NOTHING;`,
+
+	// Version 18 → 19: backfill mode: "cache-ttl" for agents with custom
+	// context_pruning config missing the mode field. Mirrors PG migration 51.
+	// Preserves user intent after the opt-in default flip. NULL rows stay NULL.
+	18: `UPDATE agents
+SET context_pruning = json_set(context_pruning, '$.mode', 'cache-ttl')
+WHERE context_pruning IS NOT NULL
+  AND context_pruning <> ''
+  AND context_pruning <> '{}'
+  AND json_valid(context_pruning)
+  AND json_type(context_pruning) = 'object'
+  AND json_extract(context_pruning, '$.mode') IS NULL;`,
+
+	// Version 19 → 20: hooks system (mirrors PG migrations 000052–000055).
+	// Creates hooks, hook_agents, hook_executions, tenant_hook_budget tables
+	// with final schema. SQLite/desktop never shipped with intermediate names
+	// (agent_hooks, agent_hook_agents) so we create the final form directly.
+	19: addHooksTables,
+
+	// Versions 20–22: no-op — consolidated into v19 above.
+	20: `SELECT 1;`,
+	21: `SELECT 1;`,
+	22: `SELECT 1;`,
+
+	// Version 23 → 24: vault_documents scope/ownership consistency triggers.
+	// Mirrors PG migration 000055 CHECK constraint; SQLite cannot add CHECK via
+	// ALTER TABLE so we use BEFORE INSERT + BEFORE UPDATE triggers instead.
+	// fresh DBs get the inline CHECK in schema.sql; existing DBs get triggers.
+	23: `CREATE TRIGGER IF NOT EXISTS trg_vault_docs_scope_consistency_ins
+  BEFORE INSERT ON vault_documents
+  FOR EACH ROW
+  WHEN NOT (
+    (NEW.scope='personal' AND NEW.agent_id IS NOT NULL AND NEW.team_id IS NULL) OR
+    (NEW.scope='team'     AND NEW.team_id  IS NOT NULL AND NEW.agent_id IS NULL) OR
+    (NEW.scope='shared'   AND NEW.agent_id IS NULL     AND NEW.team_id  IS NULL) OR
+    NEW.scope='custom'
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'vault_documents_scope_consistency violation');
+  END;
+
+CREATE TRIGGER IF NOT EXISTS trg_vault_docs_scope_consistency_upd
+  BEFORE UPDATE OF scope, agent_id, team_id ON vault_documents
+  FOR EACH ROW
+  WHEN NOT (
+    (NEW.scope='personal' AND NEW.agent_id IS NOT NULL AND NEW.team_id IS NULL) OR
+    (NEW.scope='team'     AND NEW.team_id  IS NOT NULL AND NEW.agent_id IS NULL) OR
+    (NEW.scope='shared'   AND NEW.agent_id IS NULL     AND NEW.team_id  IS NULL) OR
+    NEW.scope='custom'
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'vault_documents_scope_consistency violation');
+  END;`,
+
+	// Version 24 → 25: add chat_id column + composite index (mirrors PG migration 000056).
+	// SQLite lacks regex by default — skip backfill (desktop is single-user; cross-chat risk minimal).
+	24: `ALTER TABLE vault_documents ADD COLUMN chat_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_vault_docs_team_chat ON vault_documents(team_id, chat_id) WHERE team_id IS NOT NULL;`,
+
+	// Version 25 → 26: change agent_heartbeats.provider_id FK to ON DELETE SET NULL
+	// (mirrors PG migration 000057). SQLite cannot ALTER FK clauses, so the table
+	// must be rebuilt. Explicit 25-column INSERT/SELECT to avoid silent column drift.
+	25: `-- Defensive: clear orphan provider_id refs before rebuild (idempotent).
+UPDATE agent_heartbeats
+   SET provider_id = NULL
+ WHERE provider_id IS NOT NULL
+   AND provider_id NOT IN (SELECT id FROM llm_providers);
+
+-- Rebuild table with ON DELETE SET NULL on provider_id FK.
+CREATE TABLE agent_heartbeats_new (
+    id                 TEXT NOT NULL PRIMARY KEY,
+    agent_id           TEXT NOT NULL UNIQUE REFERENCES agents(id) ON DELETE CASCADE,
+    enabled            BOOLEAN NOT NULL DEFAULT 0,
+    interval_sec       INT NOT NULL DEFAULT 1800,
+    prompt             TEXT,
+    provider_id        TEXT REFERENCES llm_providers(id) ON DELETE SET NULL,
+    model              VARCHAR(200),
+    isolated_session   BOOLEAN NOT NULL DEFAULT 1,
+    light_context      BOOLEAN NOT NULL DEFAULT 0,
+    ack_max_chars      INT NOT NULL DEFAULT 300,
+    max_retries        INT NOT NULL DEFAULT 2,
+    active_hours_start VARCHAR(5),
+    active_hours_end   VARCHAR(5),
+    timezone           TEXT,
+    channel            VARCHAR(50),
+    chat_id            TEXT,
+    next_run_at        TEXT,
+    last_run_at        TEXT,
+    last_status        VARCHAR(20),
+    last_error         TEXT,
+    run_count          INT NOT NULL DEFAULT 0,
+    suppress_count     INT NOT NULL DEFAULT 0,
+    metadata           TEXT DEFAULT '{}',
+    created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+INSERT INTO agent_heartbeats_new (
+    id, agent_id, enabled, interval_sec, prompt, provider_id, model,
+    isolated_session, light_context, ack_max_chars, max_retries,
+    active_hours_start, active_hours_end, timezone, channel, chat_id,
+    next_run_at, last_run_at, last_status, last_error,
+    run_count, suppress_count, metadata, created_at, updated_at
+) SELECT
+    id, agent_id, enabled, interval_sec, prompt, provider_id, model,
+    isolated_session, light_context, ack_max_chars, max_retries,
+    active_hours_start, active_hours_end, timezone, channel, chat_id,
+    next_run_at, last_run_at, last_status, last_error,
+    run_count, suppress_count, metadata, created_at, updated_at
+  FROM agent_heartbeats;
+
+DROP TABLE agent_heartbeats;
+ALTER TABLE agent_heartbeats_new RENAME TO agent_heartbeats;
+
+-- Recreate the only index on agent_heartbeats (verified via grep).
+CREATE INDEX IF NOT EXISTS idx_heartbeats_due
+  ON agent_heartbeats(next_run_at)
+  WHERE enabled = 1 AND next_run_at IS NOT NULL;`,
 }
+
+// addHooksTables is the SQLite incremental migration for schema v19 → v20.
+// Mirrors PG migrations 000052–000055 (consolidated — desktop never shipped
+// with intermediate agent_hooks / agent_hook_agents names).
+const addHooksTables = `
+CREATE TABLE IF NOT EXISTS hooks (
+    id           TEXT NOT NULL PRIMARY KEY,
+    tenant_id    TEXT NOT NULL DEFAULT '0193a5b0-7000-7000-8000-000000000001',
+    scope        TEXT NOT NULL CHECK (scope IN ('global', 'tenant', 'agent')),
+    event        TEXT NOT NULL,
+    handler_type TEXT NOT NULL CHECK (handler_type IN ('command', 'http', 'prompt', 'script')),
+    config       TEXT NOT NULL DEFAULT '{}',
+    matcher      TEXT,
+    if_expr      TEXT,
+    timeout_ms   INTEGER NOT NULL DEFAULT 5000,
+    on_timeout   TEXT NOT NULL DEFAULT 'block' CHECK (on_timeout IN ('block', 'allow')),
+    priority     INTEGER NOT NULL DEFAULT 0,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    version      INTEGER NOT NULL DEFAULT 1,
+    source       TEXT NOT NULL DEFAULT 'ui' CHECK (source IN ('ui', 'api', 'seed', 'builtin')),
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    name         TEXT,
+    created_by   TEXT,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hooks_lookup
+    ON hooks (tenant_id, event)
+    WHERE enabled = 1;
+CREATE TABLE IF NOT EXISTS hook_agents (
+    hook_id  TEXT NOT NULL REFERENCES hooks(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    PRIMARY KEY (hook_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hook_agents_agent
+    ON hook_agents (agent_id);
+CREATE TABLE IF NOT EXISTS hook_executions (
+    id           TEXT NOT NULL PRIMARY KEY,
+    hook_id      TEXT REFERENCES hooks(id) ON DELETE SET NULL,
+    session_id   TEXT,
+    event        TEXT NOT NULL,
+    input_hash   TEXT,
+    decision     TEXT NOT NULL CHECK (decision IN ('allow', 'block', 'error', 'timeout')),
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    retry        INTEGER NOT NULL DEFAULT 0,
+    dedup_key    TEXT,
+    error        TEXT,
+    error_detail BLOB,
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hook_executions_session
+    ON hook_executions (session_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hook_executions_dedup
+    ON hook_executions (dedup_key)
+    WHERE dedup_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS tenant_hook_budget (
+    tenant_id      TEXT NOT NULL PRIMARY KEY,
+    month_start    TEXT NOT NULL,
+    budget_total   INTEGER NOT NULL DEFAULT 0,
+    remaining      INTEGER NOT NULL DEFAULT 0,
+    last_warned_at TEXT,
+    metadata       TEXT NOT NULL DEFAULT '{}',
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);`
 
 // backfillV16 populates base_name / path_basename for rows that existed
 // before the v15 → v16 migration. Idempotent — re-running on already-filled
@@ -564,22 +752,56 @@ func EnsureSchema(db *sql.DB) error {
 			if !ok {
 				return fmt.Errorf("sqlite: missing migration for version %d → %d", v, v+1)
 			}
+			// Migrations that rebuild a table referenced by another table's FK
+			// require foreign_keys=OFF per SQLite altertable §7. The pragma is
+			// a no-op inside a transaction, so toggle it around BEGIN/COMMIT.
+			// v25 → v26: rebuilds agent_heartbeats; heartbeat_run_logs.heartbeat_id FKs into it.
+			needsFKOff := v == 25
+			if needsFKOff {
+				if _, err := db.Exec("PRAGMA foreign_keys=OFF"); err != nil {
+					return fmt.Errorf("disable FK before v%d: %w", v, err)
+				}
+			}
 			tx, txErr := db.Begin()
 			if txErr != nil {
+				if needsFKOff {
+					_, _ = db.Exec("PRAGMA foreign_keys=ON")
+				}
 				return fmt.Errorf("begin migration tx v%d: %w", v, txErr)
 			}
 			if _, err := tx.Exec(patch); err != nil {
 				tx.Rollback()
+				if needsFKOff {
+					_, _ = db.Exec("PRAGMA foreign_keys=ON")
+				}
 				return fmt.Errorf("apply migration v%d: %w", v, err)
 			}
 			if _, err := tx.Exec(
 				"UPDATE schema_version SET version = ? WHERE version = ?", v+1, v,
 			); err != nil {
 				tx.Rollback()
+				if needsFKOff {
+					_, _ = db.Exec("PRAGMA foreign_keys=ON")
+				}
 				return fmt.Errorf("update schema version v%d: %w", v, err)
 			}
 			if err := tx.Commit(); err != nil {
+				if needsFKOff {
+					_, _ = db.Exec("PRAGMA foreign_keys=ON")
+				}
 				return fmt.Errorf("commit migration v%d: %w", v, err)
+			}
+			if needsFKOff {
+				// Verify referential integrity after the rebuild.
+				if rows, qErr := db.Query("PRAGMA foreign_key_check"); qErr == nil {
+					if rows.Next() {
+						slog.Warn("sqlite: foreign_key_check reported violations after migration", "version", v+1)
+					}
+					rows.Close()
+				}
+				if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+					return fmt.Errorf("re-enable FK after v%d: %w", v, err)
+				}
 			}
 			// Post-SQL backfill hooks for migrations needing app-side logic.
 			// modernc.org/sqlite lacks regexp_replace, so the v15 → v16

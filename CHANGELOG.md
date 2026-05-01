@@ -2,6 +2,54 @@
 
 All notable changes to GoClaw are documented here. For full documentation, see [docs.goclaw.sh](https://docs.goclaw.sh).
 
+## Unreleased
+
+### Breaking Changes
+
+- **Context pruning now opt-in.** Previously tool-result trimming ran by default
+  for all providers; now requires explicit `contextPruning.mode: "cache-ttl"` in
+  `config.agents.defaults` to enable. Matches upstream TS design and prevents
+  silent prompt-cache invalidation on Anthropic.
+
+  Migration — add to `config.json5`:
+  ```json5
+  agents: {
+    defaults: {
+      contextPruning: { mode: "cache-ttl" }
+    }
+  }
+  ```
+
+### New Features
+
+- **Pancake private-reply (comment → DM).** Enables a one-time DM to commenters
+  after the public reply. Stateless on GoClaw side — no DB dedup table, no
+  in-memory state:
+  - Config: `features.private_reply` (bool) + `private_reply_message` (text).
+  - **Template variables** `{{commenter_name}}` and `{{post_title}}` with
+    literal-replace semantics (pre-sanitizes `{{`/`}}` from var values to
+    prevent var-in-var substitution).
+  - Empty `private_reply_message` → English fallback constant.
+  - **Dedup strategy**: webhook-level comment_id dedup (already in
+    `comment_handler.go`) + Facebook's per-comment idempotent `private_replies`
+    endpoint handle duplicates platform-side. No GoClaw state required.
+  - No DB migration.
+
+### Improvements
+
+- **Context pruning cleanup.** Removed redundant Pass 0 (per-result 30% guard),
+  deduplicated double prune call per iteration, added SanitizeHistory to
+  PruneStage for broken tool_use/tool_result pair cleanup.
+- **Context pruning config backfill (migration).** Agents with existing custom
+  `context_pruning` config (e.g., `softTrimRatio`, `keepLastAssistants`) but
+  missing a `mode` field get auto-backfilled with `mode: "cache-ttl"` to
+  preserve their intent after the opt-in flip. Rows with NULL config stay
+  NULL (new opt-in default applies). PG migration 51; SQLite schema v19.
+- **Pancake channel metadata routing.** Whitelist in
+  `internal/channels/routing_metadata.go` now preserves `post_id` and
+  `display_name` across the inbound → outbound hop so the private-reply
+  template variables survive the agent pipeline round-trip.
+
 ## Project Status
 
 ### Implemented & Tested in Production
